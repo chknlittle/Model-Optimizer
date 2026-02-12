@@ -1055,17 +1055,26 @@ def export_hf_checkpoint(
         if getattr(model, "hf_quantizer", None) is not None:
             model.hf_quantizer = None
 
-        # Bypass Transformers default conversion mapping for custom/fused MoE layouts
-        # that have been structurally transformed during quant export.
+        # Bypass Transformers default conversion mapping for GLM4 MoE layouts that were
+        # structurally transformed during quant export. Restore this attribute immediately
+        # after export so in-memory model behavior remains unchanged.
+        weight_conversions_backup = None
+        has_weight_conversions = False
         if _is_glm4_moe_lite_model(model) and hasattr(model, "_weight_conversions"):
+            has_weight_conversions = True
+            weight_conversions_backup = model._weight_conversions
             model._weight_conversions = []
 
         # Save model
-        model.save_pretrained(
-            export_dir,
-            state_dict={**post_state_dict, **(extra_state_dict or {})},
-            save_modelopt_state=save_modelopt_state,
-        )
+        try:
+            model.save_pretrained(
+                export_dir,
+                state_dict={**post_state_dict, **(extra_state_dict or {})},
+                save_modelopt_state=save_modelopt_state,
+            )
+        finally:
+            if has_weight_conversions:
+                model._weight_conversions = weight_conversions_backup
 
         original_config = f"{export_dir}/config.json"
         config_data = {}

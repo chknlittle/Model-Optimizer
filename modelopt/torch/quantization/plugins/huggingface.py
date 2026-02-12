@@ -653,7 +653,7 @@ class _QuantQwen3VLMoeTextExperts(QuantModule):
         return next_states
 
 
-class _QuantGlm4MoeLiteNaiveMoe(QuantModule):
+class _QuantGlm4MoeLiteExperts(QuantModule):
     """Quant wrapper for GLM4 MoE Lite experts.
 
     Converts fused expert parameters (gate_up_proj, down_proj) into per-expert
@@ -1014,7 +1014,7 @@ def register_glm4_moe_on_the_fly(model):
         return
 
     if QuantModuleRegistry.get(moe_type) is None:
-        QuantModuleRegistry.register({moe_type: moe_type.__name__})(_QuantGlm4MoeLiteNaiveMoe)
+        QuantModuleRegistry.register({moe_type: moe_type.__name__})(_QuantGlm4MoeLiteExperts)
 
 def register_dbrx_moe_on_the_fly(model):
     """Register DBRX MoE modules as QUANT_MODULE.
