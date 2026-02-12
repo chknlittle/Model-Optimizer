@@ -99,29 +99,14 @@ DEPTHS = [
     100,
 ]
 
-# Data directory for RULER calibration files (in examples folder)
-# Downloaded via examples/llm_sparsity/attention_sparsity/download_ruler_data.sh
-_REPO_ROOT = Path(__file__).parent.parent.parent.parent.parent.parent
-DATA_DIR = _REPO_ROOT / "examples" / "llm_sparsity" / "attention_sparsity" / "data"
-RULER_URLS_FILE = DATA_DIR / "PaulGrahamEssays_URLs.txt"
-ESSAYS_DIR = DATA_DIR / "essays"
-
-
-def _get_data_dir() -> Path:
-    """Get data directory for RULER data.
-
-    Returns:
-        Path to data directory under examples/llm_sparsity/attention_sparsity/ (created if doesn't exist)
-    """
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    return DATA_DIR
-
-
-def _load_paul_graham_essays_from_files() -> str:
+def _load_paul_graham_essays_from_files(data_dir: Path) -> str:
     """Load Paul Graham essays from local files.
 
-    Reads essay .txt files from the data/essays directory.
+    Reads essay .txt files from data_dir/essays.
     Files must be downloaded first using download_ruler_data.sh.
+
+    Args:
+        data_dir: Base directory for RULER data (contains an 'essays' subdir with .txt files).
 
     Returns:
         Combined essay text
@@ -129,22 +114,23 @@ def _load_paul_graham_essays_from_files() -> str:
     Raises:
         RuntimeError: If essays directory doesn't exist or is empty
     """
-    if not ESSAYS_DIR.exists():
+    essays_dir = data_dir / "essays"
+    if not essays_dir.exists():
         raise RuntimeError(
-            f"Essays directory not found at {ESSAYS_DIR}.\n"
+            f"Essays directory not found at {essays_dir}.\n"
             "Please run the download script first:\n"
             "  bash examples/llm_sparsity/attention_sparsity/download_ruler_data.sh"
         )
 
-    essay_files = list(ESSAYS_DIR.glob("*.txt"))
+    essay_files = list(essays_dir.glob("*.txt"))
     if not essay_files:
         raise RuntimeError(
-            f"No essay files found in {ESSAYS_DIR}.\n"
+            f"No essay files found in {essays_dir}.\n"
             "Please run the download script first:\n"
             "  bash examples/llm_sparsity/attention_sparsity/download_ruler_data.sh"
         )
 
-    logger.info(f"Loading {len(essay_files)} Paul Graham essays from local files...")
+    logger.info(f"Loading {len(essay_files)} Paul Graham essays from {essays_dir}...")
 
     all_essays = []
     for filepath in essay_files:
@@ -157,15 +143,18 @@ def _load_paul_graham_essays_from_files() -> str:
     return combined_text
 
 
-def _load_paul_graham_essays() -> str:
+def _load_paul_graham_essays(data_dir: Path) -> str:
     """Load Paul Graham essays from local files.
 
     Essay files must be downloaded first using download_ruler_data.sh.
 
+    Args:
+        data_dir: Base directory for RULER data (contains an 'essays' subdir).
+
     Returns:
         Essay text as string
     """
-    essay_text = _load_paul_graham_essays_from_files()
+    essay_text = _load_paul_graham_essays_from_files(data_dir)
     return re.sub(r"\s+", " ", essay_text)
 
 
@@ -241,6 +230,7 @@ def generate_niah_sample(
     num_needle_v: int = 1,
     num_needle_q: int = 1,
     random_seed: int = 42,
+    data_dir: Path | None = None,
 ) -> dict[str, Any]:
     """Generate a single NIAH (Needle in a Haystack) sample.
 
@@ -260,6 +250,8 @@ def generate_niah_sample(
         num_needle_v: Number of needle values per key
         num_needle_q: Number of needles to query
         random_seed: Random seed for this sample
+        data_dir: Base directory for RULER data (required when type_haystack='essay').
+            Must contain an 'essays' subdir with Paul Graham .txt files.
 
     Returns:
         Dictionary with 'input', 'outputs', 'length' keys
@@ -299,8 +291,13 @@ def generate_niah_sample(
 
     # Generate context based on haystack type
     if type_haystack == "essay":
+        if data_dir is None:
+            raise ValueError(
+                "data_dir is required when type_haystack='essay'. "
+                "Pass the path to the RULER data directory (containing an 'essays' subdir)."
+            )
         # Load essay corpus
-        essay_text = _load_paul_graham_essays()
+        essay_text = _load_paul_graham_essays(Path(data_dir))
         haystack = essay_text.split(" ")
 
         # Create text from haystack
@@ -410,6 +407,7 @@ def find_optimal_haystack_size(
     answer_prefix: str,
     tokens_to_generate: int = 128,
     type_haystack: str = "essay",
+    data_dir: Path | None = None,
     **kwargs,
 ) -> int:
     """Find optimal haystack size using binary search (from official RULER).
@@ -421,6 +419,7 @@ def find_optimal_haystack_size(
         type_haystack: Type of haystack
         template: NIAH question template
         answer_prefix: Answer prefix template
+        data_dir: Base directory for RULER data (required when type_haystack='essay').
         **kwargs: Additional arguments for generate_niah_sample
 
     Returns:
@@ -445,6 +444,7 @@ def find_optimal_haystack_size(
         answer_prefix,
         tokens_to_generate,
         type_haystack=type_haystack,
+        data_dir=data_dir,
         **kwargs,
     )
 
@@ -473,6 +473,7 @@ def find_optimal_haystack_size(
             answer_prefix,
             tokens_to_generate,
             type_haystack=type_haystack,
+            data_dir=data_dir,
             **kwargs,
         )
         total_tokens = sample["length"]

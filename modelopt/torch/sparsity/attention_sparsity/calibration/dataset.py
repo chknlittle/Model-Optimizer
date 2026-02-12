@@ -15,9 +15,12 @@
 
 """RULER dataset builder for sparse attention calibration."""
 
+import hashlib
+import json
 import random
 import string
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from tqdm import tqdm
@@ -125,7 +128,7 @@ RULER_TASKS = {
         ),
         answer_prefix=(
             " Answer: According to the chain(s) of variable assignment in the text above, "
-            "{num_v} variables are assgined the value {query}, they are: "
+            "{num_v} variables are assigned the value {query}, they are: "
         ),
         args={"num_chains": 1, "num_hops": 4},
     ),
@@ -189,6 +192,8 @@ class RulerDatasetBuilder:
         num_length_bins: int = 4,
         max_length_filter: int = 65536,
         seed: int = 42,
+        cache_dir: str | None = None,
+        data_dir: str | Path | None = None,
     ):
         """Initialize RULER dataset builder.
 
@@ -199,6 +204,9 @@ class RulerDatasetBuilder:
             seed: Random seed for reproducibility
             num_length_bins: Number of length bins to generate (default: 4)
             max_length_filter: Maximum sequence length to keep (default: 65536)
+            cache_dir: Optional cache directory. If None, uses ~/.cache/modelopt/data/
+            data_dir: Optional path to RULER data directory (contains 'essays' subdir).
+                Required for NIAH tasks with essay haystack when not using pip default layout.
 
         Note:
             Length bins are auto-generated as descending powers of 2:
@@ -220,6 +228,8 @@ class RulerDatasetBuilder:
         self.tokenizer_name_or_path = tokenizer_name_or_path
         self.seed = seed
         self.max_length_filter = max_length_filter
+        self.cache_dir = cache_dir
+        self.data_dir = Path(data_dir) if data_dir is not None else None
 
         # Generate target lengths and validate
         self.target_lengths = _generate_target_lengths(max_seqlen, num_length_bins, min_seqlen=1024)
@@ -238,12 +248,58 @@ class RulerDatasetBuilder:
             self.tokenizer = tokenizer_name_or_path
         random.seed(seed)
 
+    def _get_cache_path(self) -> Path:
+        """Generate cache file path based on calibration parameters."""
+        tokenizer_path = (
+            self.tokenizer_name_or_path
+            if isinstance(self.tokenizer_name_or_path, str)
+            else str(self.tokenizer_name_or_path)
+        )
+        key = f"{tokenizer_path}_{self.total_samples}_{self.max_seqlen}"
+        hash_str = hashlib.md5(key.encode(), usedforsecurity=False).hexdigest()[:12]
+        filename = f"ruler_cache_{self.total_samples}s_{self.max_seqlen}l_{hash_str}.json"
+        if self.cache_dir:
+            base_dir = Path(self.cache_dir)
+        else:
+            base_dir = Path.home() / ".cache" / "modelopt" / "data"
+        return base_dir / filename
+
+    def _load_cached_data(self, cache_path: Path) -> list[dict[str, Any]] | None:
+        """Load calibration data from cache if it exists."""
+        if cache_path.exists():
+            try:
+                with open(cache_path) as f:
+                    data = json.load(f)
+                print(f"Loaded {len(data)} cached calibration samples from {cache_path}")
+                return data
+            except Exception as e:
+                print(f"Warning: Failed to load cache: {e}")
+        return None
+
+    def _save_cached_data(self, cache_path: Path, data: list[dict[str, Any]]) -> None:
+        """Save calibration data to cache."""
+        try:
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(cache_path, "w") as f:
+                json.dump(data, f)
+            print(f"Saved calibration samples to cache: {cache_path}")
+        except Exception as e:
+            print(f"Warning: Failed to save cache: {e}")
+
     def build_calibration_dataset(self) -> list[dict[str, Any]]:
         """Build the complete calibration dataset.
+
+        If cache_dir was set, checks cache first and returns cached data if present.
+        Otherwise generates the dataset, saves to cache (if cache_dir set), and returns.
 
         Returns:
             List of calibration samples with 'input' and 'length' fields
         """
+        cache_path = self._get_cache_path()
+        cached = self._load_cached_data(cache_path)
+        if cached is not None:
+            return cached
+
         all_samples = []
 
         print(
@@ -265,6 +321,8 @@ class RulerDatasetBuilder:
 
         random.shuffle(all_samples)
         print(f"Generated {len(all_samples)} valid samples")
+
+        self._save_cached_data(cache_path, all_samples)
         return all_samples
 
     def _generate_sample(
@@ -312,6 +370,7 @@ class RulerDatasetBuilder:
             num_needle_k=args.get("num_needle_k", 1),
             num_needle_v=args.get("num_needle_v", 1),
             num_needle_q=args.get("num_needle_q", 1),
+            data_dir=self.data_dir,
         )
 
         # Generate sample using official RULER implementation
@@ -328,6 +387,7 @@ class RulerDatasetBuilder:
             num_needle_v=args.get("num_needle_v", 1),
             num_needle_q=args.get("num_needle_q", 1),
             random_seed=self.seed + sample_idx,
+            data_dir=self.data_dir,
         )
 
         # Add task metadata

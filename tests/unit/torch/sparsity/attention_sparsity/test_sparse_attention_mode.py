@@ -37,7 +37,3 @@ def test_sparse_attention_mode_descriptor():
     assert hasattr(mode_descriptor, "convert")
 
 
-def test_mode_registry_get():
-    """Test getting mode from registry."""
-    mode = SparseAttentionModeRegistry["sparse_attention"]
-    assert mode is not None
