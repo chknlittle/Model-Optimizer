@@ -983,8 +983,15 @@ def register_glm4_moe_on_the_fly(model):
     register a quant wrapper that materializes per-expert Linear modules.
     """
 
+    model_type = getattr(getattr(model, "config", None), "model_type", None)
+    if model_type != "glm4_moe_lite":
+        return
+
     moe_type = None
     for m in model.modules():
+        if type(m).__name__ != "Glm4MoeLiteMoE":
+            continue
+
         if not (
             hasattr(m, "gate_up_proj")
             and hasattr(m, "down_proj")

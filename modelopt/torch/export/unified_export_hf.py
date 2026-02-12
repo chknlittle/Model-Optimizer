@@ -96,11 +96,15 @@ from .quant_utils import (
 __all__ = ["export_hf_checkpoint"]
 
 
+def _is_glm4_moe_lite_model(model: nn.Module) -> bool:
+    model_type = getattr(getattr(model, "config", None), "model_type", None)
+    return model_type == "glm4_moe_lite"
+
+
 def _remap_glm4_moe_expert_prefix_for_vllm(
     state_dict: dict[str, Any], model: nn.Module
 ) -> dict[str, Any]:
-    model_type = getattr(getattr(model, "config", None), "model_type", None)
-    if model_type != "glm4_moe_lite":
+    if not _is_glm4_moe_lite_model(model):
         return state_dict
 
     expert_key_pattern = re.compile(
@@ -696,13 +700,14 @@ def _export_transformers_checkpoint(
                                     quantizer_attrs=["input_quantizer"],
                                 )
                 elif any(
-                    hasattr(sub_module.experts, ln) and hasattr(getattr(sub_module.experts, ln), "__iter__")
+                    hasattr(sub_module.experts, ln)
+                    and isinstance(getattr(sub_module.experts, ln), nn.ModuleList)
                     for ln in expert_linear_names
                 ):
                     # Handle expert ModuleList attributes (e.g., GLM4 MoE Lite)
                     for linear_name in expert_linear_names:
                         linear_modulelist = getattr(sub_module.experts, linear_name, None)
-                        if hasattr(linear_modulelist, "__iter__"):
+                        if isinstance(linear_modulelist, nn.ModuleList):
                             set_expert_quantizer_amax(
                                 modules=list(linear_modulelist),
                                 quantizer_attrs=["input_quantizer"],
@@ -1052,7 +1057,7 @@ def export_hf_checkpoint(
 
         # Bypass Transformers default conversion mapping for custom/fused MoE layouts
         # that have been structurally transformed during quant export.
-        if hasattr(model, "_weight_conversions"):
+        if _is_glm4_moe_lite_model(model) and hasattr(model, "_weight_conversions"):
             model._weight_conversions = []
 
         # Save model
