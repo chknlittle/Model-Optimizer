@@ -339,6 +339,7 @@ def is_moe(module: nn.Module) -> bool:
             "Qwen2MoeSparseMoeBlock".lower(),
             "Qwen3MoeSparseMoeBlock".lower(),
             "Qwen3NextSparseMoeBlock".lower(),
+            "Glm4MoeLiteMoE".lower(),
         ]
     )
 
@@ -992,6 +993,9 @@ def get_expert_linear_names(module: nn.Module) -> list[str]:
 
         """
         return any(name.lower() in type(module).__name__.lower() for name in name_list)
+
+    if module_match_name_list(module, ["Glm4MoeLiteMoE"]):
+        return ["gate_proj", "down_proj", "up_proj"]
 
     if module_match_name_list(
         module,
