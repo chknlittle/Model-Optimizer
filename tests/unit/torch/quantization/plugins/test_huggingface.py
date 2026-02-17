@@ -29,6 +29,7 @@ from _test_utils.torch.transformers_models import (
 )
 
 import modelopt.torch.quantization as mtq
+from modelopt.torch.quantization.plugins.huggingface import register_glm4_moe_on_the_fly
 from modelopt.torch.quantization.nn import QuantLinear, QuantModuleRegistry
 
 pytest.importorskip("transformers")
@@ -199,3 +200,32 @@ def test_quantized_transformers_save_restore(tmp_path, model_cls, quant_config):
 
     model_test = model_cls.from_pretrained(tiny_llama_dir / "modelopt_model")
     tf_modelopt_state_and_output_tester(model_ref, model_test)
+
+
+def test_register_glm4_moe_on_the_fly_model_type_guard():
+    class Glm4MoeLiteMoE(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.num_experts = 2
+            self.gate_up_proj = torch.randn(2, 8, 4)
+            self.down_proj = torch.randn(2, 4, 4)
+
+    class DummyModel(nn.Module):
+        def __init__(self, model_type):
+            super().__init__()
+            self.config = type("Cfg", (), {"model_type": model_type})()
+            self.moe = Glm4MoeLiteMoE()
+
+    glm4_model = DummyModel("glm4_moe_lite")
+    non_glm4_model = DummyModel("qwen2_moe")
+
+    if QuantModuleRegistry.get(Glm4MoeLiteMoE) is not None:
+        mtq.unregister(Glm4MoeLiteMoE)
+    register_glm4_moe_on_the_fly(non_glm4_model)
+    assert QuantModuleRegistry.get(Glm4MoeLiteMoE) is None
+
+    register_glm4_moe_on_the_fly(glm4_model)
+    assert QuantModuleRegistry.get(Glm4MoeLiteMoE) is not None
+
+    if QuantModuleRegistry.get(Glm4MoeLiteMoE) is not None:
+        mtq.unregister(Glm4MoeLiteMoE)

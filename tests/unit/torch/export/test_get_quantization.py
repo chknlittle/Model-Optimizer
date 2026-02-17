@@ -15,10 +15,15 @@
 
 import pytest
 import torch
+import torch.nn as nn
 from _test_utils.torch.export.utils import ToyModel, partial_fp8_config, partial_w4a8_config
 
 import modelopt.torch.quantization as mtq
-from modelopt.torch.export.layer_utils import get_quantization_format
+from modelopt.torch.export.layer_utils import (
+    get_expert_linear_names,
+    get_quantization_format,
+    is_moe,
+)
 from modelopt.torch.export.model_config import QUANTIZATION_FP8, QUANTIZATION_W4A8_AWQ
 
 
@@ -30,3 +35,16 @@ def test_get_quantization_format(config, expected):
     model = ToyModel()
     mtq.quantize(model, config, lambda x: x(torch.randn(1, 4, 10)))
     assert get_quantization_format(model) == expected
+
+
+class Glm4MoeLiteMoE(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+
+def test_glm4_moe_lite_is_detected_as_moe():
+    assert is_moe(Glm4MoeLiteMoE())
+
+
+def test_glm4_moe_lite_expert_linear_names():
+    assert get_expert_linear_names(Glm4MoeLiteMoE()) == ["gate_proj", "down_proj", "up_proj"]

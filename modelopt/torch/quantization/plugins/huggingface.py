@@ -653,6 +653,96 @@ class _QuantQwen3VLMoeTextExperts(QuantModule):
         return next_states
 
 
+class _QuantGlm4MoeLiteExperts(QuantModule):
+    """Quant wrapper for GLM4 MoE Lite experts.
+
+    Converts fused expert parameters (gate_up_proj, down_proj) into per-expert
+    Linear modules (gate_proj, up_proj, down_proj) so default ModelOpt
+    quantization can quantize them and export can emit vLLM-compatible keys.
+    """
+
+    def _setup(self):
+        # Idempotent: if already converted, do nothing.
+        if hasattr(self, "gate_proj") and hasattr(self, "up_proj") and hasattr(self, "down_proj"):
+            return
+
+        from accelerate import init_empty_weights
+
+        if not hasattr(self, "gate_up_proj") or not hasattr(self, "down_proj"):
+            return
+
+        dtype, device = self.gate_up_proj.dtype, self.gate_up_proj.device
+
+        gate_up_proj = self.gate_up_proj
+        down_proj = self.down_proj
+        assert gate_up_proj.dim() == 3 and down_proj.dim() == 3
+
+        num_experts = int(getattr(self, "num_experts"))
+        hidden_size = int(gate_up_proj.shape[-1])
+        two_intermediate = int(gate_up_proj.shape[-2])
+        assert two_intermediate % 2 == 0
+        intermediate = two_intermediate // 2
+
+        def _copy_weight(module, weight):
+            module.to_empty(device=device)
+            with torch.no_grad():
+                module.weight.data = weight.detach().data.to(dtype=dtype, device=device)
+
+        with init_empty_weights():
+            gate_proj = nn.ModuleList(
+                [nn.Linear(hidden_size, intermediate, bias=False) for _ in range(num_experts)]
+            )
+            up_proj = nn.ModuleList(
+                [nn.Linear(hidden_size, intermediate, bias=False) for _ in range(num_experts)]
+            )
+            down_proj_modules = nn.ModuleList(
+                [nn.Linear(intermediate, hidden_size, bias=False) for _ in range(num_experts)]
+            )
+
+        for idx in range(num_experts):
+            _copy_weight(gate_proj[idx], gate_up_proj[idx, :intermediate, :])
+            _copy_weight(up_proj[idx], gate_up_proj[idx, intermediate:, :])
+            _copy_weight(down_proj_modules[idx], down_proj[idx, :, :])
+
+        delattr(self, "gate_up_proj")
+        delattr(self, "down_proj")
+
+        self.gate_proj = gate_proj
+        self.up_proj = up_proj
+        self.down_proj = down_proj_modules
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        top_k_index: torch.Tensor,
+        top_k_weights: torch.Tensor,
+    ) -> torch.Tensor:
+        final_hidden_states = torch.zeros_like(hidden_states)
+        with torch.no_grad():
+            expert_mask = torch.nn.functional.one_hot(top_k_index, num_classes=self.num_experts)
+            expert_mask = expert_mask.permute(2, 1, 0)
+            expert_hit = torch.greater(expert_mask.sum(dim=(-1, -2)), 0).nonzero()
+
+        for expert_idx in expert_hit:
+            expert_idx = expert_idx[0]
+            if expert_idx == self.num_experts:
+                continue
+            top_k_pos, token_idx = torch.where(expert_mask[expert_idx])
+            current_state = hidden_states[token_idx]
+            gate = self.gate_proj[expert_idx](current_state)
+            up = self.up_proj[expert_idx](current_state)
+            current_hidden_states = self.act_fn(gate) * up
+            current_hidden_states = self.down_proj[expert_idx](current_hidden_states)
+            current_hidden_states = (
+                current_hidden_states * top_k_weights[token_idx, top_k_pos, None]
+            )
+            final_hidden_states.index_add_(
+                0, token_idx, current_hidden_states.to(final_hidden_states.dtype)
+            )
+
+        return final_hidden_states
+
+
 class _QuantDbrxFFN(_QuantSparseMoe):
     @property
     def num_experts(self):
@@ -885,6 +975,47 @@ except ImportError:
     pass
 
 
+def register_glm4_moe_on_the_fly(model):
+    """Register GLM4-style fused MoE expert modules as QUANT_MODULE.
+
+    Some trust_remote_code models expose routed experts as fused tensors
+    (gate_up_proj, down_proj). We detect that module layout directly and
+    register a quant wrapper that materializes per-expert Linear modules.
+    """
+
+    model_type = getattr(getattr(model, "config", None), "model_type", None)
+    if model_type != "glm4_moe_lite":
+        return
+
+    moe_type = None
+    for m in model.modules():
+        if type(m).__name__ != "Glm4MoeLiteMoE":
+            continue
+
+        if not (
+            hasattr(m, "gate_up_proj")
+            and hasattr(m, "down_proj")
+            and hasattr(m, "num_experts")
+        ):
+            continue
+
+        gate_up = getattr(m, "gate_up_proj")
+        down = getattr(m, "down_proj")
+
+        if hasattr(gate_up, "dim") and hasattr(down, "dim"):
+            try:
+                if gate_up.dim() == 3 and down.dim() == 3:
+                    moe_type = type(m)
+                    break
+            except Exception:
+                continue
+
+    if moe_type is None:
+        return
+
+    if QuantModuleRegistry.get(moe_type) is None:
+        QuantModuleRegistry.register({moe_type: moe_type.__name__})(_QuantGlm4MoeLiteExperts)
+
 def register_dbrx_moe_on_the_fly(model):
     """Register DBRX MoE modules as QUANT_MODULE.
 
@@ -974,6 +1105,7 @@ AutoQuantizeGradientSearcher.register_custom_support(
 CUSTOM_MODEL_PLUGINS.update(
     [
         register_falcon_linears_on_the_fly,
+        register_glm4_moe_on_the_fly,
         register_dbrx_moe_on_the_fly,
         register_hf_attentions_on_the_fly,
         convert_hf_parallel_linears_on_the_fly,

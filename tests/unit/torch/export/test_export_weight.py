@@ -19,7 +19,10 @@ import torch
 from _test_utils.torch.export.utils import ToyModel, partial_fp8_config, partial_w4a8_config
 
 import modelopt.torch.quantization as mtq
-from modelopt.torch.export.unified_export_hf import _export_quantized_weight
+from modelopt.torch.export.unified_export_hf import (
+    _export_quantized_weight,
+    _remap_glm4_moe_expert_prefix_for_vllm,
+)
 from modelopt.torch.quantization.utils import quantizer_attr_names
 
 
@@ -96,3 +99,24 @@ def test_export_per_block_quantized_weight():
     assert hasattr(model.linears[2], quantizer_attrs.output_quantizer)
     assert not getattr(model.linears[2], quantizer_attrs.output_quantizer).is_enabled
     assert not hasattr(model.linears[2], quantizer_attrs.output_scale)
+
+
+def test_remap_glm4_moe_expert_prefix_for_vllm():
+    class _Cfg:
+        model_type = "glm4_moe_lite"
+
+    class _Model:
+        config = _Cfg()
+
+    state_dict = {
+        "model.layers.1.mlp.experts.down_proj.0.input_scale": torch.tensor(1.0),
+        "model.layers.1.mlp.experts.gate_proj.7.weight": torch.ones((2, 2)),
+        "model.layers.1.self_attn.q_proj.weight": torch.zeros((2, 2)),
+    }
+
+    remapped = _remap_glm4_moe_expert_prefix_for_vllm(state_dict, _Model())
+
+    assert "model.layers.1.mlp.experts.0.down_proj.input_scale" in remapped
+    assert "model.layers.1.mlp.experts.7.gate_proj.weight" in remapped
+    assert "model.layers.1.mlp.experts.down_proj.0.input_scale" not in remapped
+    assert "model.layers.1.self_attn.q_proj.weight" in remapped

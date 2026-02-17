@@ -96,6 +96,35 @@ from .quant_utils import (
 __all__ = ["export_hf_checkpoint"]
 
 
+def _is_glm4_moe_lite_model(model: nn.Module) -> bool:
+    model_type = getattr(getattr(model, "config", None), "model_type", None)
+    return model_type == "glm4_moe_lite"
+
+
+def _remap_glm4_moe_expert_prefix_for_vllm(
+    state_dict: dict[str, Any], model: nn.Module
+) -> dict[str, Any]:
+    if not _is_glm4_moe_lite_model(model):
+        return state_dict
+
+    expert_key_pattern = re.compile(
+        r"^model\.layers\.(\d+)\.mlp\.experts\.(gate_proj|down_proj|up_proj)\.(\d+)\.(.+)$"
+    )
+
+    remapped_state_dict = {}
+    for key, value in state_dict.items():
+        match = expert_key_pattern.match(key)
+        if match is None:
+            remapped_state_dict[key] = value
+            continue
+
+        layer_id, linear_name, expert_id, suffix = match.groups()
+        remapped_key = f"model.layers.{layer_id}.mlp.experts.{expert_id}.{linear_name}.{suffix}"
+        remapped_state_dict[remapped_key] = value
+
+    return remapped_state_dict
+
+
 def _is_enabled_quantizer(quantizer):
     if hasattr(quantizer, "is_enabled") and quantizer.is_enabled:
         return True
@@ -670,6 +699,19 @@ def _export_transformers_checkpoint(
                                     modules=[linear_module],
                                     quantizer_attrs=["input_quantizer"],
                                 )
+                elif any(
+                    hasattr(sub_module.experts, ln)
+                    and isinstance(getattr(sub_module.experts, ln), nn.ModuleList)
+                    for ln in expert_linear_names
+                ):
+                    # Handle expert ModuleList attributes (e.g., GLM4 MoE Lite)
+                    for linear_name in expert_linear_names:
+                        linear_modulelist = getattr(sub_module.experts, linear_name, None)
+                        if isinstance(linear_modulelist, nn.ModuleList):
+                            set_expert_quantizer_amax(
+                                modules=list(linear_modulelist),
+                                quantizer_attrs=["input_quantizer"],
+                            )
                 elif isinstance(sub_module.experts, collections.abc.Iterable):
                     # For other MoE models (like Mixtral) with iterable experts
                     try:
@@ -737,6 +779,7 @@ def _export_transformers_checkpoint(
     quantized_state_dict = postprocess_state_dict(
         quantized_state_dict, kv_cache_max_bound, kv_cache_format, is_modelopt_qlora
     )
+    quantized_state_dict = _remap_glm4_moe_expert_prefix_for_vllm(quantized_state_dict, model)
 
     return quantized_state_dict, quant_config
 
@@ -1012,12 +1055,26 @@ def export_hf_checkpoint(
         if getattr(model, "hf_quantizer", None) is not None:
             model.hf_quantizer = None
 
+        # Bypass Transformers default conversion mapping for GLM4 MoE layouts that were
+        # structurally transformed during quant export. Restore this attribute immediately
+        # after export so in-memory model behavior remains unchanged.
+        weight_conversions_backup = None
+        has_weight_conversions = False
+        if _is_glm4_moe_lite_model(model) and hasattr(model, "_weight_conversions"):
+            has_weight_conversions = True
+            weight_conversions_backup = model._weight_conversions
+            model._weight_conversions = []
+
         # Save model
-        model.save_pretrained(
-            export_dir,
-            state_dict={**post_state_dict, **(extra_state_dict or {})},
-            save_modelopt_state=save_modelopt_state,
-        )
+        try:
+            model.save_pretrained(
+                export_dir,
+                state_dict={**post_state_dict, **(extra_state_dict or {})},
+                save_modelopt_state=save_modelopt_state,
+            )
+        finally:
+            if has_weight_conversions:
+                model._weight_conversions = weight_conversions_backup
 
         original_config = f"{export_dir}/config.json"
         config_data = {}
